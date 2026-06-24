@@ -478,6 +478,7 @@ function buildInstalledVencordBootstrap() {
         "(function(){",
         "if(globalThis.__FILESPLITTER_VENCORD_FALLBACK__) return;",
         "globalThis.__FILESPLITTER_VENCORD_FALLBACK__=true;",
+        "globalThis.FileSplitterVencordFallback=true;",
         pluginDef,
         "function ensureSettings(){",
         "try{",

@@ -13,6 +13,10 @@ var cs={};
 var mergedResults=new Map();
 var processedMessageIds=new Set();
 var lastRenderedVersion=new Map();
+var IS_VENCORD_FALLBACK=typeof globalThis!=="undefined"&&globalThis.FileSplitterVencordFallback===true;
+function hasKnownChunks(){
+return Object.keys(cs).length>0||mergedResults.size>0;
+}
 async function downloadBlob(blob,filename){
 if(typeof DiscordNative!=="undefined"&&DiscordNative.fileManager&&typeof DiscordNative.fileManager.saveWithDialog==="function"){
 try{
@@ -274,6 +278,14 @@ hideAnchorChunkPayload(messageEl,chunk);
 function hideKnownChunkMessages(){
 Object.keys(cs).forEach(function(key){hideChunkMessages(key);});
 }
+function findPreviewNode(key){
+var nodes=document.querySelectorAll("[data-filesplitter-preview]");
+for(var i=0;i<nodes.length;i++){
+var node=nodes[i];
+if(node instanceof HTMLElement&&node.dataset.filesplitterPreview===key)return node;
+}
+return null;
+}
 function createActionButton(label,onClick){
 var button=document.createElement("button");
 button.type="button";
@@ -372,12 +384,13 @@ wrapper.appendChild(body);
 return wrapper;
 }
 function renderMergedResult(key,force){
+try{
 var result=mergedResults.get(key);
 var anchorChunk=getAnchorChunk(key);
 if(!result||!anchorChunk||!anchorChunk.channelId||!anchorChunk.messageId)return;
 var version=result.status+"|"+(result.objectUrl||"")+(result.error||"");
 if(!force&&lastRenderedVersion.get(key)===version){
-var existing=document.querySelector("[data-filesplitter-preview='"+key+"']");
+var existing=findPreviewNode(key);
 if(existing)return;
 }
 var messageEl=getMessageElement(anchorChunk.channelId,anchorChunk.messageId,anchorChunk.url);
@@ -385,10 +398,13 @@ if(!messageEl)return;
 var mount=getResultMount(messageEl);
 if(!mount)return;
 hideChunkMessages(key);
-var existingCard=document.querySelector("[data-filesplitter-preview='"+key+"']");
+var existingCard=findPreviewNode(key);
 if(existingCard)existingCard.remove();
 mount.replaceChildren(createResultCardNode(result));
 lastRenderedVersion.set(key,version);
+}catch(e){
+console.error("[FileSplitter] Render error:",e);
+}
 }
 function renderAllMergedResults(){
 mergedResults.forEach(function(_,key){renderMergedResult(key);});
@@ -511,14 +527,26 @@ var expectedCount=entry.ch[0].total;
 if(entry.ch.length!==expectedCount)return;
 entry.mg=true;
 entry.ch.sort(function(a,b){return a.index-b.index;});
+try{
 hideChunkMessages(key);
-void ensureMergedResult(key,isInlinePreviewableImage(entry.ch[0].originalName));
+}catch(e){
+console.error("[FileSplitter] Hide error:",e);
+}
+void ensureMergedResult(key,isInlinePreviewableImage(entry.ch[0].originalName)).catch(function(e){
+console.error("[FileSplitter] Merge result error:",e);
+});
 }
 function processChunk(c,attachmentUrl){
 var normalizedUrl=normalizeAttachmentUrl(attachmentUrl);
 if(!normalizedUrl)return;
 var stored=storeChunk(c,normalizedUrl);
-void tryMergeChunks(stored.key);
+void tryMergeChunks(stored.key).catch(function(e){
+console.error("[FileSplitter] Merge error:",e);
+});
+if(IS_VENCORD_FALLBACK){
+setTimeout(scheduleRender,250);
+setTimeout(scheduleRender,1500);
+}
 }
 function processMessage(message){
 if(!message||!message.content||!message.attachments||!message.attachments.length)return false;
@@ -539,7 +567,9 @@ for(var i=0;i<messages.length;i++){
 if(processMessage(messages[i]))found++;
 }
 if(found>0)console.log("[FileSplitter] Scanned channel, found",found,"chunks from existing messages");
-Object.keys(cs).forEach(function(key){void tryMergeChunks(key);});
+Object.keys(cs).forEach(function(key){
+void tryMergeChunks(key).catch(function(e){console.error("[FileSplitter] Scanned merge error:",e);});
+});
 }catch(e){
 console.error("[FileSplitter] Scan error:",e);
 }}
@@ -642,11 +672,24 @@ self._onMessageCreate=function(d){try{processMessage(d.message);}catch(e){consol
 self._onMessageUpdate=function(d){try{if(d.message&&d.message.id)processedMessageIds.delete(d.message.id);processMessage(d.message);}catch(e){console.error("[FileSplitter] Update handler error:",e);}};
 self._pendingRender=null;
 function scheduleRender(){
+if(!hasKnownChunks())return;
 if(self._pendingRender)return;
-self._pendingRender=requestAnimationFrame(function(){self._pendingRender=null;renderAllMergedResults();hideKnownChunkMessages();});
+var raf=typeof requestAnimationFrame==="function"?requestAnimationFrame:function(cb){return setTimeout(cb,16);};
+self._pendingRender=raf(function(){
+self._pendingRender=null;
+try{
+renderAllMergedResults();
+hideKnownChunkMessages();
+}catch(e){
+console.error("[FileSplitter] Scheduled render error:",e);
 }
-self._onLoadMessagesSuccess=function(d){if(d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();}};
-self._onChannelSelect=function(d){if(d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();clearTimeout(self._delayedChannelScan);self._delayedChannelScan=setTimeout(function(){scanExistingMessages(d.channelId);scheduleRender();},1500);}};
+});
+}
+self._onLoadMessagesSuccess=function(d){if(!IS_VENCORD_FALLBACK&&d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();}};
+self._onChannelSelect=function(d){
+if(IS_VENCORD_FALLBACK){scheduleRender();return;}
+if(d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();clearTimeout(self._delayedChannelScan);self._delayedChannelScan=setTimeout(function(){scanExistingMessages(d.channelId);scheduleRender();},1500);}
+};
 C.FluxDispatcher.subscribe("MESSAGE_CREATE",self._onMessageCreate);
 C.FluxDispatcher.subscribe("MESSAGE_UPDATE",self._onMessageUpdate);
 C.FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS",self._onLoadMessagesSuccess);
@@ -654,12 +697,12 @@ C.FluxDispatcher.subscribe("CHANNEL_SELECT",self._onChannelSelect);
 __ADD_CBB__("FileSplitter",SplitButton,SplitIcon);
 self._clearMergedResults=clearMergedResults;
 ensureHideStyle();
-if(typeof MutationObserver!=="undefined"&&document.body){
+if(!IS_VENCORD_FALLBACK&&typeof MutationObserver!=="undefined"&&document.body){
 self._hideObserver=new MutationObserver(function(){scheduleRender();});
 self._hideObserver.observe(document.body,{childList:true,subtree:true});
 }
 var currentChannel=C.SelectedChannelStore.getChannelId();
-if(currentChannel){
+if(!IS_VENCORD_FALLBACK&&currentChannel){
 scanExistingMessages(currentChannel);
 scheduleRender();
 self._delayedChannelScan=setTimeout(function(){scanExistingMessages(currentChannel);scheduleRender();},1500);
@@ -674,7 +717,10 @@ if(this._onChannelSelect)C.FluxDispatcher.unsubscribe("CHANNEL_SELECT",this._onC
 __REMOVE_CBB__("FileSplitter");
 if(this._cleanupInterval)clearInterval(this._cleanupInterval);
 if(this._delayedChannelScan)clearTimeout(this._delayedChannelScan);
-if(this._pendingRender)cancelAnimationFrame(this._pendingRender);
+if(this._pendingRender){
+if(typeof cancelAnimationFrame==="function")cancelAnimationFrame(this._pendingRender);
+else clearTimeout(this._pendingRender);
+}
 if(this._hideObserver)this._hideObserver.disconnect();
 if(this._clearMergedResults)this._clearMergedResults();
 }
