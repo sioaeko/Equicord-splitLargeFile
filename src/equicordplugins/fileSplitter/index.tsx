@@ -552,7 +552,7 @@ export default definePlugin({
             find: '.CUSTOM_GIFT?""',
             replacement: [
                 {
-                    match: /message:(\i),message:\{id:\i\}.{0,200}renderContentOnly:\i\}=\i;/,
+                    match: /message:(\i),message:\{id:\i\}.{0,200}?renderContentOnly:\i\}=\i;/,
                     replace: "$&if($self.shouldHideChunkMessage($1)) return null;"
                 },
                 {
