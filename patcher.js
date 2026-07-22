@@ -20,6 +20,23 @@ const WINDOWS_CLIENTS = [
     ["Equilotl", "Equilotl.exe"]
 ];
 
+function buildFetchChunkIpcHandlerBody() {
+    return [
+        'try{var _fsElectron=require("electron"),_fsIpc=_fsElectron.ipcMain,_fsNet=_fsElectron.net;',
+        'if(typeof _fsIpc.removeHandler==="function")_fsIpc.removeHandler("FileSplitterFetchBlob");',
+        '_fsIpc.handle("FileSplitterFetchBlob",async function(e,u){',
+        'function valid(v){if(typeof v!=="string"||!v||v.length>2048)return null;try{var p=new URL(v);if(p.protocol!=="https:"||p.username||p.password||(p.port&&p.port!=="443")||["cdn.discordapp.com","media.discordapp.net"].indexOf(p.hostname)===-1||p.pathname.indexOf("/attachments/")!==0)return null;return p;}catch(e){return null;}}',
+        'var p=valid(u),r;if(!p)throw new Error("Unsupported attachment URL");',
+        'try{r=await _fsNet.fetch(p.toString(),{redirect:"error"});}catch(e){throw new Error("Attachment download failed; redirects are not supported");}',
+        'if(!r||!r.ok)throw new Error("HTTP "+(r?r.status:"request failed"));',
+        'var length=Number(r.headers.get("content-length"));if(Number.isFinite(length)&&length>10485760)throw new Error("Chunk exceeds the 10MB limit");',
+        'var reader=r.body&&r.body.getReader();if(!reader)throw new Error("Attachment response has no body");var chunks=[],total=0;',
+        'for(;;){var part=await reader.read();if(part.done)break;total+=part.value.byteLength;if(total>10485760){await reader.cancel();throw new Error("Chunk exceeds the 10MB limit");}chunks.push(Buffer.from(part.value));}',
+        'return Buffer.concat(chunks,total);});',
+        '}catch(e){console.warn("[FileSplitter] IPC setup failed:",e&&e.message?e.message:e);}'
+    ].join("");
+}
+
 function isWindows() {
     return PLATFORM === "win32";
 }
@@ -478,7 +495,6 @@ function buildInstalledVencordBootstrap() {
         "(function(){",
         "if(globalThis.__FILESPLITTER_VENCORD_FALLBACK__) return;",
         "globalThis.__FILESPLITTER_VENCORD_FALLBACK__=true;",
-        "globalThis.FileSplitterVencordFallback=true;",
         pluginDef,
         "function ensureSettings(){",
         "try{",
@@ -488,10 +504,12 @@ function buildInstalledVencordBootstrap() {
         "try{p.plugins??={};}catch(e){}",
         "try{p.plugins.FileSplitter??={};p.plugins.FileSplitter.enabled=true;}catch(e){}",
         "try{p.plugins.ChatInputButtonAPI??={};p.plugins.ChatInputButtonAPI.enabled=true;}catch(e){}",
+        "try{p.plugins.MessageAccessoriesAPI??={};p.plugins.MessageAccessoriesAPI.enabled=true;}catch(e){}",
         "}",
         "if(Vencord.Settings){",
         "try{Vencord.Settings.plugins.FileSplitter??={};Vencord.Settings.plugins.FileSplitter.enabled=true;}catch(e){}",
         "try{Vencord.Settings.plugins.ChatInputButtonAPI??={};Vencord.Settings.plugins.ChatInputButtonAPI.enabled=true;}catch(e){}",
+        "try{Vencord.Settings.plugins.MessageAccessoriesAPI??={};Vencord.Settings.plugins.MessageAccessoriesAPI.enabled=true;}catch(e){}",
         "}",
         "}catch(e){}",
         "}",
@@ -508,40 +526,38 @@ function buildInstalledVencordBootstrap() {
         "if(_FS_.started){return true;}",
         "console.log('[FileSplitter] Vencord bootstrap starting...');",
         "ensureSettings();",
+        "var manager=Vencord.Plugins;",
         "var existing=plugins.FileSplitter;",
         "if(existing&&existing!==_FS_){",
-        "try{",
-        "if(existing.started){",
-        "var stopFn=Vencord.Plugins.stopPlugin||(Vencord.Api&&Vencord.Api.PluginManager&&Vencord.Api.PluginManager.stopPlugin);",
-        "if(typeof stopFn==='function'){try{stopFn(existing);}catch(e){}}",
-        "else if(typeof existing.stop==='function'){try{existing.stop();}catch(e){}}",
+        "if(!existing.started&&manager&&typeof manager.startDependenciesRecursive==='function'){try{manager.startDependenciesRecursive(existing);}catch(e){console.warn('[FileSplitter] existing deps:',e);}}",
+        "if(!existing.started&&manager&&typeof manager.startPlugin==='function'){setTimeout(function(){if(!existing.started){try{manager.startPlugin(existing);}catch(e){console.error('[FileSplitter] existing start error:',e);}}},2000);}",
+        "console.log('[FileSplitter] Existing plugin kept:',!!existing.started);",
+        "return true;",
         "}",
-        "existing.started=false;",
-        "}catch(e){console.warn('[FileSplitter] stop existing:',e);}",
-        "}",
+        "globalThis.FileSplitterCompatibilityMode=true;",
         "_FS_.enabledByDefault=true;",
-        "_FS_.dependencies=['ChatInputButtonAPI'];",
+        "_FS_.dependencies=['ChatInputButtonAPI','MessageAccessoriesAPI'];",
         "plugins.FileSplitter=_FS_;",
-        "var manager=Vencord.Plugins;",
         "if(manager&&manager.plugins&&manager.plugins!==plugins){manager.plugins.FileSplitter=_FS_;}",
         "if(manager&&typeof manager.startDependenciesRecursive==='function'){",
         "try{manager.startDependenciesRecursive(_FS_);}catch(e){console.warn('[FileSplitter] deps:',e);}",
         "}",
         "if(manager&&typeof manager.startPlugin==='function'){",
-        "try{var ok=manager.startPlugin(_FS_);console.log('[FileSplitter] startPlugin result:',ok);}catch(e){console.error('[FileSplitter] startPlugin error:',e);}",
+        "setTimeout(function(){if(!_FS_.started){try{manager.startPlugin(_FS_);}catch(e){console.error('[FileSplitter] startPlugin error:',e);}}},2000);",
         "}else{",
         "try{_FS_.start();_FS_.started=true;}catch(e){console.error('[FileSplitter] start error:',e);return false;}",
         "}",
-        "console.log('[FileSplitter] Started:', !!_FS_.started);",
-        "return !!_FS_.started;",
+        "console.log('[FileSplitter] Registered compatibility plugin');",
+        "return true;",
         "}catch(e){",
         "console.error('[FileSplitter] bootstrap error:',e);",
         "return false;",
         "}",
         "}",
-        "if(!tryStart()){",
-        "var _fsRetry=setInterval(function(){if(tryStart()){clearInterval(_fsRetry);}},1000);",
-        "setTimeout(function(){clearInterval(_fsRetry);if(!_FS_.started)console.error('[FileSplitter] Failed to start after 30s');},30000);",
+        "var _fsReady=tryStart();",
+        "if(!_fsReady){",
+        "var _fsRetry=setInterval(function(){if(tryStart()){_fsReady=true;clearInterval(_fsRetry);}},1000);",
+        "setTimeout(function(){clearInterval(_fsRetry);if(!_fsReady)console.error('[FileSplitter] Failed to start after 30s');},30000);",
         "}",
         "})();",
         VENCORD_PATCH_END,
@@ -566,10 +582,12 @@ function buildInstalledEquicordBootstrap() {
         "try{p.plugins??={};}catch(e){}",
         "try{p.plugins.FileSplitter??={};p.plugins.FileSplitter.enabled=true;}catch(e){}",
         "try{p.plugins.ChatInputButtonAPI??={};p.plugins.ChatInputButtonAPI.enabled=true;}catch(e){}",
+        "try{p.plugins.MessageAccessoriesAPI??={};p.plugins.MessageAccessoriesAPI.enabled=true;}catch(e){}",
         "}",
         "if(Vencord.Settings){",
         "try{Vencord.Settings.plugins.FileSplitter??={};Vencord.Settings.plugins.FileSplitter.enabled=true;}catch(e){}",
         "try{Vencord.Settings.plugins.ChatInputButtonAPI??={};Vencord.Settings.plugins.ChatInputButtonAPI.enabled=true;}catch(e){}",
+        "try{Vencord.Settings.plugins.MessageAccessoriesAPI??={};Vencord.Settings.plugins.MessageAccessoriesAPI.enabled=true;}catch(e){}",
         "}",
         "}catch(e){console.warn('[FileSplitter] ensureSettings error:',e);}",
         "}",
@@ -584,29 +602,38 @@ function buildInstalledEquicordBootstrap() {
         "if(_FS_.started){return true;}",
         "console.log('[FileSplitter] Bootstrap starting...');",
         "ensureSettings();",
+        "var manager=Vencord.Plugins||(Vencord.Api&&Vencord.Api.PluginManager);",
         "var existing=plugins.FileSplitter;",
         "if(existing&&existing!==_FS_){",
-        "try{if(existing.started&&typeof existing.stop==='function')existing.stop();}catch(e){console.warn('[FileSplitter] stop previous error:',e);}",
-        "existing.started=false;",
+        "if(!existing.started&&manager&&typeof manager.startDependenciesRecursive==='function'){try{manager.startDependenciesRecursive(existing);}catch(e){console.warn('[FileSplitter] existing deps:',e);}}",
+        "if(!existing.started&&manager&&typeof manager.startPlugin==='function'){setTimeout(function(){if(!existing.started){try{manager.startPlugin(existing);}catch(e){console.error('[FileSplitter] existing start error:',e);}}},2000);}",
+        "console.log('[FileSplitter] Existing plugin kept:',!!existing.started);",
+        "return true;",
         "}",
+        "globalThis.FileSplitterCompatibilityMode=true;",
         "_FS_.enabledByDefault=true;",
-        "_FS_.dependencies=['ChatInputButtonAPI'];",
+        "_FS_.dependencies=['ChatInputButtonAPI','MessageAccessoriesAPI'];",
         "plugins.FileSplitter=_FS_;",
-        "var manager=Vencord.Api&&Vencord.Api.PluginManager;",
         "if(manager&&manager.plugins&&manager.plugins!==plugins){manager.plugins.FileSplitter=_FS_;}",
         "if(manager&&typeof manager.startDependenciesRecursive==='function'){",
         "try{manager.startDependenciesRecursive(_FS_);}catch(e){}",
         "}",
+        "if(manager&&typeof manager.startPlugin==='function'){",
+        "setTimeout(function(){if(!_FS_.started){try{manager.startPlugin(_FS_);}catch(e){console.error('[FileSplitter] start error:',e);}}},2000);",
+        "}else{",
         "try{_FS_.start();_FS_.started=true;}catch(e){console.error('[FileSplitter] start error:',e);return false;}",
-        "return !!_FS_.started;",
+        "}",
+        "console.log('[FileSplitter] Registered compatibility plugin');",
+        "return true;",
         "}catch(e){",
         "console.error('[FileSplitter] bootstrap error:',e);",
         "return false;",
         "}",
         "}",
-        "if(!tryStart()){",
-        "var _fsRetry=setInterval(function(){if(tryStart()){clearInterval(_fsRetry);}},1000);",
-        "setTimeout(function(){clearInterval(_fsRetry);if(!_FS_.started)console.error('[FileSplitter] Failed to start after 30s');},30000);",
+        "var _fsReady=tryStart();",
+        "if(!_fsReady){",
+        "var _fsRetry=setInterval(function(){if(tryStart()){_fsReady=true;clearInterval(_fsRetry);}},1000);",
+        "setTimeout(function(){clearInterval(_fsRetry);if(!_fsReady)console.error('[FileSplitter] Failed to start after 30s');},30000);",
         "}",
         "})();",
         EQUICORD_PATCH_END,
@@ -658,7 +685,7 @@ async function install(options = {}) {
         // Add IPC handler to patcher.js (main process)
         let patcherCode = fs.readFileSync(eqPatcherPath, "utf8");
         const ipcMarker = "/* FILESPLITTER_IPC */";
-        const ipcHandlerBody = 'try{require("electron").ipcMain.handle("FileSplitterFetchBlob",async function(e,u){var p=new URL(u);if(p.protocol!=="https:"||["cdn.discordapp.com","media.discordapp.net"].indexOf(p.hostname)===-1)throw new Error("Unsupported attachment URL");var r=await require("electron").net.fetch(u);if(!r.ok)throw new Error("HTTP "+r.status);return Buffer.from(await r.arrayBuffer());});}catch(e){}';
+        const ipcHandlerBody = buildFetchChunkIpcHandlerBody();
         const ipcHandler = `\n${ipcMarker}\n${ipcHandlerBody}\n${ipcMarker}\n`;
         while (patcherCode.includes(ipcMarker)) {
             const start = patcherCode.indexOf(ipcMarker);
@@ -710,7 +737,7 @@ async function install(options = {}) {
 
 function injectVencordIpc(paths) {
     const IPC_MARKER = "/* FILESPLITTER_IPC */";
-    const ipcHandler = `\n${IPC_MARKER}\ntry{require("electron").ipcMain.handle("FileSplitterFetchBlob",async function(e,u){var p=new URL(u);if(p.protocol!=="https:"||["cdn.discordapp.com","media.discordapp.net"].indexOf(p.hostname)===-1)throw new Error("Unsupported attachment URL");var r=await require("electron").net.fetch(u);if(!r.ok)throw new Error("HTTP "+r.status);return Buffer.from(await r.arrayBuffer());});}catch(e){}\n${IPC_MARKER}\n`;
+    const ipcHandler = `\n${IPC_MARKER}\n${buildFetchChunkIpcHandlerBody()}\n${IPC_MARKER}\n`;
 
     // Patch patcher.js (main process IPC handler)
     if (fs.existsSync(paths.patcherPath)) {
@@ -1370,7 +1397,8 @@ function formatInstalledSuccessMessage(result, restart) {
     const lines = [
         "Install complete.",
         result.backupCreated ? "Backup created." : "Using existing backup.",
-        `Renderer updated:\n${result.paths.rendererPath}`
+        `Renderer updated:\n${result.paths.rendererPath}`,
+        "Compatibility install: client updates may require reinstalling FileSplitter."
     ];
 
     appendGuiRestartSummary(lines, restart);
@@ -1382,7 +1410,8 @@ function formatInstalledVencordSuccessMessage(result, restart) {
     const lines = [
         "Install complete.",
         result.backupCreated ? "Vencord backup created." : "Using existing Vencord backup.",
-        `Renderer updated:\n${result.paths.rendererPath}`
+        `Renderer updated:\n${result.paths.rendererPath}`,
+        "Compatibility install: Vencord officially supports custom plugins through source builds."
     ];
 
     appendGuiRestartSummary(lines, restart);
@@ -1627,6 +1656,7 @@ async function runCli(argv = process.argv.slice(2)) {
             const restart = options.restartClient ? restartClient(options) : null;
             if (options.restartClient) formatRestartLines(restart).forEach(line => console.log(line.replace(/\n/g, " ")));
             console.log("FileSplitter was injected into installed Vencord successfully.");
+            console.log("Compatibility install: Vencord officially supports custom plugins through source builds.");
             return;
         }
 
@@ -1638,6 +1668,7 @@ async function runCli(argv = process.argv.slice(2)) {
         const restart = options.restartClient ? restartClient(options) : null;
         if (options.restartClient) formatRestartLines(restart).forEach(line => console.log(line.replace(/\n/g, " ")));
         console.log("FileSplitter was injected successfully.");
+        console.log("Compatibility install: client updates may require reinstalling FileSplitter.");
     } catch (error) {
         const message = error?.stack || error?.message || String(error);
         if ((argv || process.argv.slice(2)).includes("--gui") || !process.argv.slice(2).length) {

@@ -9,7 +9,7 @@ import "./styles.css";
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { classNameFactory } from "@utils/css";
-import { isObject } from "@utils/misc";
+import { isObject, sleep } from "@utils/misc";
 import definePlugin, { PluginNative } from "@utils/types";
 import { chooseFile, saveFile } from "@utils/web";
 import { Message } from "@vencord/discord-types";
@@ -31,6 +31,7 @@ const SCAN_DELAY = 1500;
 const PRUNE_INTERVAL = 60 * 1000;
 const MAX_PARALLEL_DOWNLOADS = 4;
 const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK_SIZE);
+const MAX_STORED_MESSAGES = 200;
 const CHUNK_UPLOADS_PER_WINDOW = 4;
 const CHUNK_UPLOAD_WINDOW = 5500;
 
@@ -58,8 +59,8 @@ function useStore() {
     }, []);
 }
 
-function chunkKey(c: Pick<ChunkMeta, "originalName" | "originalSize" | "timestamp">) {
-    return `${c.originalName}_${c.originalSize}_${c.timestamp}`;
+function chunkKey(c: Pick<ChunkData, "channelId" | "originalName" | "originalSize" | "timestamp">) {
+    return `${c.channelId}_${c.originalName}_${c.originalSize}_${c.timestamp}`;
 }
 
 function mimeType(filename: string) {
@@ -72,13 +73,20 @@ function isImage(filename: string) {
 }
 
 function normalizeUrl(url: string | null | undefined): string | null {
-    if (!url) return null;
+    if (!url || url.length > 2048) return null;
     try {
         const u = new URL(url);
+        if (
+            u.protocol !== "https:"
+            || u.username || u.password
+            || (u.port && u.port !== "443")
+            || !["cdn.discordapp.com", "media.discordapp.net"].includes(u.hostname)
+            || !u.pathname.startsWith("/attachments/")
+        ) return null;
         if (u.hostname === "media.discordapp.net") u.hostname = "cdn.discordapp.com";
         return u.toString();
     } catch {
-        return url.replace("://media.discordapp.net/", "://cdn.discordapp.com/");
+        return null;
     }
 }
 
@@ -106,7 +114,7 @@ function parseChunkMeta(content: string | undefined): Omit<ChunkMeta, "type"> | 
         type !== "FileSplitterChunk"
         || typeof index !== "number" || !Number.isSafeInteger(index) || index < 0
         || typeof total !== "number" || !Number.isSafeInteger(total) || total <= 0 || total > MAX_CHUNKS || index >= total
-        || typeof originalName !== "string" || originalName.length === 0
+        || typeof originalName !== "string" || originalName.length === 0 || originalName.length > 255
         || typeof originalSize !== "number" || !Number.isFinite(originalSize) || originalSize <= 0 || originalSize > MAX_FILE_SIZE
         || typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0
     ) return null;
@@ -128,16 +136,13 @@ function anchorMessageId(key: string): string | null {
 }
 
 async function fetchBlob(url: string, filename?: string): Promise<Blob> {
-    const normalized = normalizeUrl(url) ?? url;
+    const normalized = normalizeUrl(url);
+    if (!normalized) throw new Error("Unsupported attachment URL");
 
     if (Native) {
-        try {
-            const res = await Native.fetchChunk(normalized);
-            if (res.success && res.data)
-                return new Blob([res.data], { type: res.contentType ?? (filename ? mimeType(filename) : null) ?? "application/octet-stream" });
-        } catch {
-            return fetchBrowserBlob(normalized);
-        }
+        const res = await Native.fetchChunk(normalized);
+        if (!res.success || !res.data) throw new Error(res.error ?? "Chunk download failed");
+        return new Blob([res.data], { type: res.contentType ?? (filename ? mimeType(filename) : null) ?? "application/octet-stream" });
     }
 
     return fetchBrowserBlob(normalized);
@@ -146,7 +151,11 @@ async function fetchBlob(url: string, filename?: string): Promise<Blob> {
 async function fetchBrowserBlob(url: string): Promise<Blob> {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.blob();
+    const contentLength = Number(r.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > CHUNK_SIZE) throw new Error("Chunk exceeds the 10MB limit");
+    const blob = await r.blob();
+    if (blob.size > CHUNK_SIZE) throw new Error("Chunk exceeds the 10MB limit");
+    return blob;
 }
 
 async function fetchChunkParts(chunks: ChunkData[], filename: string): Promise<Blob[]> {
@@ -164,7 +173,9 @@ async function assembleBlob(key: string): Promise<{ blob: Blob; mimeType: string
     const name = entry.chunks[0].originalName;
     const parts = await fetchChunkParts(entry.chunks, name);
     const mime = mimeType(name) ?? "application/octet-stream";
-    return { blob: new Blob(parts, { type: mime }), mimeType: mime };
+    const blob = new Blob(parts, { type: mime });
+    if (blob.size !== entry.chunks[0].originalSize) throw new Error("Merged file size does not match its metadata");
+    return { blob, mimeType: mime };
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -201,6 +212,7 @@ async function handleDownload(key: string) {
 function storeChunk(chunk: ChunkData) {
     const key = chunkKey(chunk);
     const entry = chunkStore[key] ?? (chunkStore[key] = { chunks: [], lastUpdated: Date.now() });
+    if (entry.chunks.length && entry.chunks[0].total !== chunk.total) return null;
     const existing = entry.chunks.find(c => c.index === chunk.index);
 
     let changed = false;
@@ -260,16 +272,19 @@ function processComplete(key: string) {
 }
 
 function processMessage(message: Message) {
+    if (message.channel_id !== SelectedChannelStore.getChannelId()) return;
     const chunk = getChunkFromMessage(message);
     if (!chunk) return;
     const key = storeChunk(chunk);
+    if (!key) return;
     if (isComplete(chunkStore[key])) processComplete(key);
 }
 
 function scanChannel(channelId: string) {
+    if (channelId !== SelectedChannelStore.getChannelId()) return;
     const messages = MessageStore.getMessages(channelId);
     if (!messages) return;
-    for (const msg of messages.toArray()) processMessage(msg);
+    for (const msg of messages.toArray().slice(-MAX_STORED_MESSAGES)) processMessage(msg);
 }
 
 function clearAll() {
@@ -318,10 +333,6 @@ function uploadChunk(channelId: string, file: File, meta: ChunkMeta): Promise<vo
             reject(new Error(e instanceof Error ? e.message : String(e)));
         }
     });
-}
-
-function wait(ms: number) {
-    return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
 
 function shouldPauseForUploadWindow(index: number, total: number) {
@@ -503,7 +514,7 @@ const SplitButton: ChatBarButtonFactory = ({ isMainChat, channel }) => {
                 setStatus(`${Math.round(((i + 1) / totalChunks) * 100)}%`);
                 if (shouldPauseForUploadWindow(i, totalChunks)) {
                     setStatus(`${Math.round(((i + 1) / totalChunks) * 100)}% (rate limit pause)`);
-                    await wait(CHUNK_UPLOAD_WINDOW);
+                    await sleep(CHUNK_UPLOAD_WINDOW);
                 }
             }
             Toasts.show({ message: `Uploaded ${totalChunks} parts for ${file.name}`, id: Toasts.genId(), type: Toasts.Type.SUCCESS });
@@ -583,7 +594,10 @@ export default definePlugin({
         const chunk = getChunkFromMessage(message);
         if (!chunk) return false;
         const key = chunkKey(chunk);
-        return anchorMessageId(key) !== message.id;
+        const entry = chunkStore[key];
+        if (!entry || !isComplete(entry)) return false;
+        const anchorId = anchorMessageId(key);
+        return Boolean(anchorId && anchorId !== message.id);
     },
 
     flux: {
@@ -594,13 +608,15 @@ export default definePlugin({
             processMessage(message);
         },
         LOAD_MESSAGES_SUCCESS({ channelId }) {
-            if (channelId) scanChannel(channelId);
+            if (channelId === SelectedChannelStore.getChannelId()) scanChannel(channelId);
         },
         CHANNEL_SELECT({ channelId }) {
             if (!channelId) return;
-            scanChannel(channelId);
+            clearAll();
             clearTimeout(delayedScan);
-            delayedScan = setTimeout(() => scanChannel(channelId), SCAN_DELAY);
+            delayedScan = setTimeout(() => {
+                if (channelId === SelectedChannelStore.getChannelId()) scanChannel(channelId);
+            }, SCAN_DELAY);
         }
     },
 
@@ -609,7 +625,9 @@ export default definePlugin({
         const ch = SelectedChannelStore.getChannelId();
         if (ch) {
             scanChannel(ch);
-            delayedScan = setTimeout(() => scanChannel(ch), SCAN_DELAY);
+            delayedScan = setTimeout(() => {
+                if (ch === SelectedChannelStore.getChannelId()) scanChannel(ch);
+            }, SCAN_DELAY);
         }
         cleanupInterval = setInterval(pruneOldChunks, PRUNE_INTERVAL);
     },

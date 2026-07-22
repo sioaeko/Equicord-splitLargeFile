@@ -2,10 +2,19 @@ var _FS_=__DP_FN__({
 name:"FileSplitter",
 description:"Splits large files into 10MB chunks to bypass Discord's default limit.",
 authors:[{id:1505110745258397849n,name:"sioaeko"}],
+dependencies:["ChatInputButtonAPI","MessageAccessoriesAPI"],
+renderMessageAccessory(props){
+var component=_FS_._renderMessageAccessory;
+return typeof component==="function"&&_FS_._React?_FS_._React.createElement(component,props):null;
+},
 start(){
 var self=this;
 var C=Vencord.Webpack.Common;
+self._React=C.React;
 var CHUNK_SIZE=10*1024*1024;
+var MAX_FILE_SIZE=500*1024*1024;
+var MAX_CHUNKS=Math.ceil(MAX_FILE_SIZE/CHUNK_SIZE);
+var MAX_STORED_MESSAGES=200;
 var CHUNK_TIMEOUT=30*60*1000;
 var CHUNK_UPLOADS_PER_WINDOW=4;
 var CHUNK_UPLOAD_WINDOW=5500;
@@ -13,7 +22,6 @@ var cs={};
 var mergedResults=new Map();
 var processedMessageIds=new Set();
 var lastRenderedVersion=new Map();
-var IS_VENCORD_FALLBACK=typeof globalThis!=="undefined"&&globalThis.FileSplitterVencordFallback===true;
 function hasKnownChunks(){
 return Object.keys(cs).length>0||mergedResults.size>0;
 }
@@ -35,15 +43,18 @@ a.click();
 document.body.removeChild(a);
 setTimeout(function(){URL.revokeObjectURL(url);},60000);
 }
-function getChunkKey(c){return c.originalName+"_"+(c.originalSize==null?"unknown":c.originalSize)+"_"+c.timestamp;}
+function getChunkKey(c){return (c.channelId||"unknown")+"_"+c.originalName+"_"+c.originalSize+"_"+c.timestamp;}
 function normalizeAttachmentUrl(url){
-if(!url)return null;
+if(typeof url!=="string"||url.length===0||url.length>2048)return null;
 try{
 var parsed=new URL(url);
+if(parsed.protocol!=="https:"||parsed.username||parsed.password||parsed.port&&parsed.port!=="443")return null;
+if(parsed.hostname!=="cdn.discordapp.com"&&parsed.hostname!=="media.discordapp.net")return null;
+if(parsed.pathname.indexOf("/attachments/")!==0)return null;
 if(parsed.hostname==="media.discordapp.net")parsed.hostname="cdn.discordapp.com";
 return parsed.toString();
 }catch{
-return String(url).replace("://media.discordapp.net/","://cdn.discordapp.com/");
+return null;
 }}
 function getAttachmentUrl(attachment){
 return (attachment&&(
@@ -55,22 +66,17 @@ null
 ))||null;
 }
 function parseChunkMeta(content){
+var c;
 try{
-var c=JSON.parse(content);
-if(typeof c==="object"&&c&&c.type==="FileSplitterChunk"&&Number.isInteger(c.index)&&c.index>=0&&Number.isInteger(c.total)&&c.total>0&&c.index<c.total&&typeof c.originalName==="string"&&typeof c.originalSize==="number"&&Number.isFinite(c.originalSize)&&typeof c.timestamp==="number")return c;
-}catch{}
+ c=JSON.parse(content);
+}catch{return null;}
+if(typeof c==="object"&&c&&c.type==="FileSplitterChunk"&&Number.isSafeInteger(c.index)&&c.index>=0&&Number.isSafeInteger(c.total)&&c.total>0&&c.total<=MAX_CHUNKS&&c.index<c.total&&typeof c.originalName==="string"&&c.originalName.length>0&&c.originalName.length<=255&&typeof c.originalSize==="number"&&Number.isFinite(c.originalSize)&&c.originalSize>0&&c.originalSize<=MAX_FILE_SIZE&&typeof c.timestamp==="number"&&Number.isFinite(c.timestamp)&&c.timestamp>0)return c;
 return null;
 }
 function getStoredMessages(channelId){
 var messages=C.MessageStore.getMessages(channelId);
-if(!messages)return [];
-if(Array.isArray(messages))return messages;
-if(typeof messages.toArray==="function")return messages.toArray();
-if(typeof messages.values==="function")return Array.from(messages.values());
-if(Array.isArray(messages._array))return messages._array;
-if(Array.isArray(messages.array))return messages.array;
-if(messages._map&&typeof messages._map.values==="function")return Array.from(messages._map.values());
-return Object.values(messages).filter(function(message){return typeof (message&&message.content)==="string";});
+if(!messages||typeof messages.toArray!=="function")return [];
+return messages.toArray().slice(-MAX_STORED_MESSAGES);
 }
 var IMAGE_MIME_BY_EXTENSION={
 avif:"image/avif",
@@ -290,6 +296,7 @@ function createActionButton(label,onClick){
 var button=document.createElement("button");
 button.type="button";
 button.textContent=label;
+button.setAttribute("aria-label",label);
 button.onclick=onClick;
 button.style.border="none";
 button.style.borderRadius="8px";
@@ -306,6 +313,8 @@ function createResultCardNode(result){
 var wrapper=document.createElement("div");
 wrapper.dataset.filesplitterPreview=result.key;
 wrapper.dataset.filesplitterResultCard="true";
+wrapper.setAttribute("role","group");
+wrapper.setAttribute("aria-label","Merged file: "+result.originalName);
 wrapper.style.marginTop="8px";
 wrapper.style.width="100%";
 wrapper.style.maxWidth="420px";
@@ -355,6 +364,7 @@ title.style.overflow="hidden";
 title.style.textOverflow="ellipsis";
 title.style.whiteSpace="nowrap";
 var subtitle=document.createElement("div");
+subtitle.setAttribute("aria-live","polite");
 subtitle.style.fontFamily="var(--font-primary, gg sans, sans-serif)";
 subtitle.style.fontSize="12px";
 subtitle.style.fontWeight="600";
@@ -424,14 +434,26 @@ if(result.objectUrl)URL.revokeObjectURL(result.objectUrl);
 mergedResults.clear();
 lastRenderedVersion.clear();
 }
+function clearRuntimeState(){
+clearMergedResults();
+Object.keys(cs).forEach(function(key){delete cs[key];});
+processedMessageIds.clear();
+}
 async function fetchBlob(url){
+var normalized=normalizeAttachmentUrl(url);
+if(!normalized)throw new Error("Unsupported attachment URL");
 if(typeof VencordNative!=="undefined"&&VencordNative.fileSplitter&&typeof VencordNative.fileSplitter.fetchBlob==="function"){
-var buf=await VencordNative.fileSplitter.fetchBlob(url);
+var buf=await VencordNative.fileSplitter.fetchBlob(normalized);
+if(!buf||buf.byteLength>CHUNK_SIZE)throw new Error("Chunk exceeds the 10MB limit");
 return new Blob([buf]);
 }
-var r=await fetch(url);
+var r=await fetch(normalized);
 if(!r.ok)throw new Error("HTTP "+r.status);
-return await r.blob();
+var contentLength=Number(r.headers.get("content-length"));
+if(Number.isFinite(contentLength)&&contentLength>CHUNK_SIZE)throw new Error("Chunk exceeds the 10MB limit");
+var blob=await r.blob();
+if(blob.size>CHUNK_SIZE)throw new Error("Chunk exceeds the 10MB limit");
+return blob;
 }
 async function assembleBlob(key){
 var entry=cs[key];
@@ -441,7 +463,9 @@ for(var i=0;i<entry.ch.length;i++){
 parts.push(await fetchBlob(entry.ch[i].url));
 }
 var mimeType=inferMimeType(entry.ch[0].originalName)||"application/octet-stream";
-return{blob:new Blob(parts,{type:mimeType}),mimeType:mimeType};
+var merged=new Blob(parts,{type:mimeType});
+if(merged.size!==entry.ch[0].originalSize)throw new Error("Merged file size does not match its metadata");
+return{blob:merged,mimeType:mimeType};
 }
 async function ensureMergedResult(key,eagerImagePreview){
 var entry=cs[key];
@@ -511,6 +535,7 @@ renderMergedResult(key);
 function storeChunk(c,attachmentUrl){
 var key=getChunkKey(c);
 if(!cs[key])cs[key]={ch:[],lu:Date.now()};
+if(cs[key].ch.length&&cs[key].ch[0].total!==c.total)return null;
 var existing=cs[key].ch.find(function(x){return x.index===c.index;});
 if(existing){
 Object.assign(existing,Object.assign({},c,{url:attachmentUrl}));
@@ -538,35 +563,34 @@ console.error("[FileSplitter] Merge result error:",e);
 }
 function processChunk(c,attachmentUrl){
 var normalizedUrl=normalizeAttachmentUrl(attachmentUrl);
-if(!normalizedUrl)return;
+if(!normalizedUrl)return false;
 var stored=storeChunk(c,normalizedUrl);
+if(!stored)return false;
 void tryMergeChunks(stored.key).catch(function(e){
 console.error("[FileSplitter] Merge error:",e);
 });
-if(IS_VENCORD_FALLBACK){
-setTimeout(scheduleRender,250);
-setTimeout(scheduleRender,1500);
-}
+return true;
 }
 function processMessage(message){
 if(!message||!message.content||!message.attachments||!message.attachments.length)return false;
+var selectedChannel=C.SelectedChannelStore.getChannelId();
+if(!selectedChannel||message.channel_id!==selectedChannel)return false;
 if(message.id&&processedMessageIds.has(message.id))return true;
 var c=parseChunkMeta(message.content);
 if(!c)return false;
 var attachmentUrl=getAttachmentUrl(message.attachments[0]);
 if(!attachmentUrl)return false;
+if(!processChunk(Object.assign({},c,{channelId:message.channel_id,messageId:message.id}),attachmentUrl))return false;
 if(message.id)processedMessageIds.add(message.id);
-processChunk(Object.assign({},c,{channelId:message.channel_id,messageId:message.id}),attachmentUrl);
 return true;
 }
 function scanExistingMessages(channelId){
 try{
+if(!channelId||channelId!==C.SelectedChannelStore.getChannelId())return;
 var messages=getStoredMessages(channelId);
-var found=0;
 for(var i=0;i<messages.length;i++){
-if(processMessage(messages[i]))found++;
+processMessage(messages[i]);
 }
-if(found>0)console.log("[FileSplitter] Scanned channel, found",found,"chunks from existing messages");
 Object.keys(cs).forEach(function(key){
 void tryMergeChunks(key).catch(function(e){console.error("[FileSplitter] Scanned merge error:",e);});
 });
@@ -685,28 +709,52 @@ console.error("[FileSplitter] Scheduled render error:",e);
 }
 });
 }
-self._onLoadMessagesSuccess=function(d){if(!IS_VENCORD_FALLBACK&&d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();}};
+function cancelScheduledScans(){
+if(!self._scanTimers)return;
+self._scanTimers.forEach(function(timer){clearTimeout(timer);});
+self._scanTimers=[];
+}
+function scheduleChannelScans(channelId){
+if(!channelId)return;
+cancelScheduledScans();
+self._scanTimers=[250,1500].map(function(delay){
+return setTimeout(function(){
+if(channelId!==C.SelectedChannelStore.getChannelId())return;
+scanExistingMessages(channelId);
+scheduleRender();
+},delay);
+});
+}
+self._renderMessageAccessory=function(props){
+var message=props&&props.message;
+var messageId=message&&message.id;
+var content=message&&message.content;
+var attachmentCount=message&&message.attachments?message.attachments.length:0;
+C.React.useEffect(function(){
+if(!message)return;
+processMessage(message);
+scheduleRender();
+},[messageId,content,attachmentCount]);
+return null;
+};
+self._onLoadMessagesSuccess=function(d){
+if(d&&d.channelId===C.SelectedChannelStore.getChannelId())scheduleChannelScans(d.channelId);
+};
 self._onChannelSelect=function(d){
-if(IS_VENCORD_FALLBACK){scheduleRender();return;}
-if(d&&d.channelId){scanExistingMessages(d.channelId);scheduleRender();clearTimeout(self._delayedChannelScan);self._delayedChannelScan=setTimeout(function(){scanExistingMessages(d.channelId);scheduleRender();},1500);}
+if(!d||!d.channelId)return;
+clearRuntimeState();
+scheduleChannelScans(d.channelId);
 };
 C.FluxDispatcher.subscribe("MESSAGE_CREATE",self._onMessageCreate);
 C.FluxDispatcher.subscribe("MESSAGE_UPDATE",self._onMessageUpdate);
 C.FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS",self._onLoadMessagesSuccess);
 C.FluxDispatcher.subscribe("CHANNEL_SELECT",self._onChannelSelect);
 __ADD_CBB__("FileSplitter",SplitButton,SplitIcon);
-self._clearMergedResults=clearMergedResults;
+self._clearRuntimeState=clearRuntimeState;
 ensureHideStyle();
-if(!IS_VENCORD_FALLBACK&&typeof MutationObserver!=="undefined"&&document.body){
-self._hideObserver=new MutationObserver(function(){scheduleRender();});
-self._hideObserver.observe(document.body,{childList:true,subtree:true});
-}
 var currentChannel=C.SelectedChannelStore.getChannelId();
-if(!IS_VENCORD_FALLBACK&&currentChannel){
-scanExistingMessages(currentChannel);
-scheduleRender();
-self._delayedChannelScan=setTimeout(function(){scanExistingMessages(currentChannel);scheduleRender();},1500);
-}
+clearRuntimeState();
+if(currentChannel)scheduleChannelScans(currentChannel);
 },
 stop(){
 var C=Vencord.Webpack.Common;
@@ -716,12 +764,14 @@ if(this._onLoadMessagesSuccess)C.FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCE
 if(this._onChannelSelect)C.FluxDispatcher.unsubscribe("CHANNEL_SELECT",this._onChannelSelect);
 __REMOVE_CBB__("FileSplitter");
 if(this._cleanupInterval)clearInterval(this._cleanupInterval);
-if(this._delayedChannelScan)clearTimeout(this._delayedChannelScan);
+if(this._scanTimers)this._scanTimers.forEach(function(timer){clearTimeout(timer);});
 if(this._pendingRender){
 if(typeof cancelAnimationFrame==="function")cancelAnimationFrame(this._pendingRender);
 else clearTimeout(this._pendingRender);
 }
-if(this._hideObserver)this._hideObserver.disconnect();
-if(this._clearMergedResults)this._clearMergedResults();
+if(this._clearRuntimeState)this._clearRuntimeState();
+this._clearRuntimeState=null;
+this._renderMessageAccessory=null;
+this._React=null;
 }
 });
