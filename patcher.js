@@ -8,6 +8,8 @@ const VENCORD_PATCH_START = "/* FILESPLITTER_VENCORD_PATCH_START */";
 const VENCORD_PATCH_END = "/* FILESPLITTER_VENCORD_PATCH_END */";
 const EQUICORD_PATCH_START = "/* FILESPLITTER_EQUICORD_PATCH_START */";
 const EQUICORD_PATCH_END = "/* FILESPLITTER_EQUICORD_PATCH_END */";
+const VENCORD_IPC_MARKER = "/* FILESPLITTER_IPC */";
+const VENCORD_PLUGIN_META_ENTRY = 'FileSplitter:{folderName:"src/userplugins/fileSplitter",userPlugin:true},';
 const ROOT_DIR = __dirname;
 const PLATFORM = process.platform;
 const MAC_CLIENT_NAMES = ["Discord", "Discord PTB", "Discord Canary", "Equicord", "Equilotl"];
@@ -709,7 +711,7 @@ async function install(options = {}) {
             ipcInjected = true;
             console.log("  IPC fetch bridge already present");
         } else {
-            const invokeMatch = preloadCode.match(/function (\w+)\(\w+[^)]*\)\{return \w+\.ipcRenderer\.invoke\(/);
+            const invokeMatch = preloadCode.match(/function (\w+)\(\w+[^)]*\)\{return \w+\.ipcRenderer\.invoke\s*\(/);
             const invokeFn = invokeMatch ? invokeMatch[1] : "r";
             // Find the pluginHelpers variable name (e.g. "S" in: pluginHelpers:S})
             const phMatch = preloadCode.match(/pluginHelpers:(\w+)\}/);
@@ -735,61 +737,147 @@ async function install(options = {}) {
     return { paths, backupCreated, inlineInjected, ipcInjected, mode: "patched-renderer" };
 }
 
-function injectVencordIpc(paths) {
-    const IPC_MARKER = "/* FILESPLITTER_IPC */";
-    const ipcHandler = `\n${IPC_MARKER}\n${buildFetchChunkIpcHandlerBody()}\n${IPC_MARKER}\n`;
+function stripMarkedBlocks(code, marker) {
+    let updated = code;
+    while (updated.includes(marker)) {
+        const start = updated.indexOf(marker);
+        const end = updated.indexOf(marker, start + marker.length);
+        if (end === -1) {
+            throw new Error("Malformed " + marker + " block.");
+        }
+        updated = updated.slice(0, start) + updated.slice(end + marker.length);
+    }
+    return updated;
+}
 
-    // Patch patcher.js (main process IPC handler)
-    if (fs.existsSync(paths.patcherPath)) {
-        if (!fs.existsSync(paths.patcherBak)) {
-            fs.copyFileSync(paths.patcherPath, paths.patcherBak);
-        }
-        let code = fs.readFileSync(paths.patcherPath, "utf8");
-        // Remove old injection
-        if (code.includes(IPC_MARKER)) {
-            const s = code.indexOf(IPC_MARKER);
-            const e = code.indexOf(IPC_MARKER, s + IPC_MARKER.length);
-            if (e !== -1) code = code.slice(0, s) + code.slice(e + IPC_MARKER.length);
-        }
-        const licenseIdx = code.lastIndexOf("/*! For license");
-        if (licenseIdx !== -1) {
-            code = code.slice(0, licenseIdx) + ipcHandler + code.slice(licenseIdx);
-        } else {
-            code += ipcHandler;
-        }
-        fs.writeFileSync(paths.patcherPath, code);
-        console.log("  Vencord patcher.js: IPC handler injected");
+function buildVencordPatcherIpc(code) {
+    const ipcHandlerBody = buildFetchChunkIpcHandlerBody();
+    const ipcHandler = "\n" + VENCORD_IPC_MARKER + "\n" + ipcHandlerBody + "\n" + VENCORD_IPC_MARKER + "\n";
+    let updated = stripMarkedBlocks(code, VENCORD_IPC_MARKER);
+    updated = updated.split(ipcHandlerBody).join("");
+
+    const licenseIdx = updated.lastIndexOf("/*! For license");
+    return licenseIdx === -1
+        ? updated + ipcHandler
+        : updated.slice(0, licenseIdx) + ipcHandler + updated.slice(licenseIdx);
+}
+
+function hasVencordPreloadBridge(code) {
+    return code.includes('fileSplitter:{fetchBlob:function')
+        || code.includes('.fileSplitter={fetchBlob:function');
+}
+
+function buildVencordPreloadBridge(code) {
+    let updated = stripMarkedBlocks(code, VENCORD_IPC_MARKER);
+    if (hasVencordPreloadBridge(updated)) {
+        return { code: updated, alreadyPresent: true, nativeVar: null, ipcRendererVar: null };
     }
 
-    // Patch preload.js (bridge to renderer)
-    if (fs.existsSync(paths.preloadPath)) {
-        if (!fs.existsSync(paths.preloadBak)) {
-            fs.copyFileSync(paths.preloadPath, paths.preloadBak);
-        }
-        let code = fs.readFileSync(paths.preloadPath, "utf8");
-        // Remove old injection
-        if (code.includes(IPC_MARKER)) {
-            const s = code.indexOf(IPC_MARKER);
-            const e = code.indexOf(IPC_MARKER, s + IPC_MARKER.length);
-            if (e !== -1) code = code.slice(0, s) + code.slice(e + IPC_MARKER.length);
-        }
-        const invokeMatch = code.match(/function (\w+)\(\w+[^)]*\)\{return \w+\.ipcRenderer\.invoke\(/);
-        const invokeFn = invokeMatch ? invokeMatch[1] : "r";
-        const phMatch = code.match(/pluginHelpers:(\w+)\}/);
-        if (phMatch) {
-            const phVar = phMatch[1];
-            code = code.replace(
-                `pluginHelpers:${phVar}}`,
-                `pluginHelpers:${phVar},fileSplitter:{fetchBlob:function(u){return ${invokeFn}("FileSplitterFetchBlob",u)}}}`
-            );
-            fs.writeFileSync(paths.preloadPath, code);
-            console.log(`  Vencord preload.js: bridge injected (invoke=${invokeFn}, helpers=${phVar})`);
-            return true;
-        } else {
-            console.warn("  Vencord preload.js: could not find injection point");
-        }
+    const exposeMatch = updated.match(
+        /([A-Za-z_$][\w$]*)\.contextBridge\.exposeInMainWorld\s*\(\s*["']VencordNative["']\s*,\s*([A-Za-z_$][\w$]*)\s*\)/
+    );
+    if (!exposeMatch) {
+        throw new Error('Vencord preload.js does not expose a recognizable "VencordNative" object.');
     }
-    return false;
+
+    const invokeMatch = updated.match(/([A-Za-z_$][\w$]*)\.ipcRenderer\.invoke\s*\(/);
+    if (!invokeMatch) {
+        throw new Error("Vencord preload.js does not contain a recognizable ipcRenderer.invoke call.");
+    }
+
+    const nativeVar = exposeMatch[2];
+    const ipcRendererVar = invokeMatch[1];
+    const bridge = [
+        VENCORD_IPC_MARKER,
+        nativeVar + '.fileSplitter={fetchBlob:function(u){return ' + ipcRendererVar + '.ipcRenderer.invoke("FileSplitterFetchBlob",u)}};',
+        VENCORD_IPC_MARKER,
+        ""
+    ].join("\n");
+
+    updated = updated.slice(0, exposeMatch.index) + bridge + updated.slice(exposeMatch.index);
+    return { code: updated, alreadyPresent: false, nativeVar, ipcRendererVar };
+}
+
+function hasInstalledVencordPluginMeta(code) {
+    return code.includes(VENCORD_PLUGIN_META_ENTRY)
+        || code.includes('[_FS_.name]:{folderName:"src/userplugins/fileSplitter",userPlugin:true},');
+}
+
+function injectInstalledVencordPluginMeta(code) {
+    if (hasInstalledVencordPluginMeta(code)) return code;
+
+    const metaMatch = code.match(
+        /([A-Za-z_$][\w$]*)=\{(?=\[[A-Za-z_$][\w$]*\.name\]:\{folderName:"[^"]+",userPlugin:(?:!0|!1|true|false)\})/
+    );
+    if (!metaMatch) {
+        throw new Error("Vencord renderer.js does not contain a recognizable PluginMeta registry.");
+    }
+
+    const insertPos = metaMatch.index + metaMatch[0].length;
+    return code.slice(0, insertPos) + VENCORD_PLUGIN_META_ENTRY + code.slice(insertPos);
+}
+
+function prepareVencordIpc(paths) {
+    if (!fs.existsSync(paths.patcherPath)) {
+        throw new Error("Missing file: " + paths.patcherPath);
+    }
+    if (!fs.existsSync(paths.preloadPath)) {
+        throw new Error("Missing file: " + paths.preloadPath);
+    }
+
+    const patcherOriginal = fs.readFileSync(paths.patcherPath, "utf8");
+    const preloadOriginal = fs.readFileSync(paths.preloadPath, "utf8");
+    const patcherCode = buildVencordPatcherIpc(patcherOriginal);
+    const preload = buildVencordPreloadBridge(preloadOriginal);
+
+    return {
+        patcherOriginal,
+        preloadOriginal,
+        patcherCode,
+        preloadCode: preload.code,
+        preload
+    };
+}
+
+function ensureVencordIpcBackups(paths) {
+    if (!fs.existsSync(paths.patcherBak)) {
+        fs.copyFileSync(paths.patcherPath, paths.patcherBak);
+    }
+    if (!fs.existsSync(paths.preloadBak)) {
+        fs.copyFileSync(paths.preloadPath, paths.preloadBak);
+    }
+}
+
+function writeFilesWithRollback(entries) {
+    const written = [];
+    try {
+        for (const entry of entries) {
+            fs.writeFileSync(entry.path, entry.updated);
+            written.push(entry);
+        }
+    } catch (error) {
+        const rollbackErrors = [];
+        for (const entry of written.reverse()) {
+            try {
+                fs.writeFileSync(entry.path, entry.original);
+            } catch (rollbackError) {
+                rollbackErrors.push(entry.path + ": " + rollbackError.message);
+            }
+        }
+
+        if (rollbackErrors.length) {
+            throw new Error(error.message + "\nRollback failed:\n" + rollbackErrors.join("\n"));
+        }
+        throw error;
+    }
+}
+
+function validateJavaScript(label, code) {
+    try {
+        new Function(code);
+    } catch (error) {
+        throw new Error(label + " failed syntax validation: " + error.message);
+    }
 }
 
 function restoreVencordIpc(paths) {
@@ -803,21 +891,43 @@ function restoreVencordIpc(paths) {
 
 function installInstalledVencord(options = {}) {
     const paths = getVencordPaths(options);
-    const backupCreated = ensureRendererBackup(paths);
     const existing = readRenderer(paths);
     const sanitized = removeInstalledVencordPatch(removeExistingPlugin(existing)).trimEnd();
+    const rendererWithMeta = injectInstalledVencordPluginMeta(sanitized);
     const bootstrap = buildInstalledVencordBootstrap();
-    fs.writeFileSync(paths.rendererPath, `${sanitized}\n${bootstrap}`);
+    const rendererCode = rendererWithMeta + "\n" + bootstrap;
+    const ipc = prepareVencordIpc(paths);
 
-    // Inject IPC fetch handler (CORS bypass via main process)
-    let ipcInjected = false;
-    try {
-        ipcInjected = injectVencordIpc(paths);
-    } catch (e) {
-        console.warn("  Vencord IPC injection failed:", e.message);
+    validateJavaScript("Vencord renderer.js", rendererCode);
+    validateJavaScript("Vencord patcher.js", ipc.patcherCode);
+    validateJavaScript("Vencord preload.js", ipc.preloadCode);
+
+    const backupCreated = ensureRendererBackup(paths);
+    ensureVencordIpcBackups(paths);
+    writeFilesWithRollback([
+        { path: paths.rendererPath, original: existing, updated: rendererCode },
+        { path: paths.patcherPath, original: ipc.patcherOriginal, updated: ipc.patcherCode },
+        { path: paths.preloadPath, original: ipc.preloadOriginal, updated: ipc.preloadCode }
+    ]);
+
+    console.log("  Vencord patcher.js: IPC handler injected");
+    if (ipc.preload.alreadyPresent) {
+        console.log("  Vencord preload.js: bridge already present");
+    } else {
+        console.log(
+            "  Vencord preload.js: bridge injected (native=" + ipc.preload.nativeVar
+            + ", ipc=" + ipc.preload.ipcRendererVar + ")"
+        );
     }
+    console.log("  Vencord renderer.js: PluginMeta registered");
 
-    return { paths, backupCreated, ipcInjected, mode: "patched-vencord-renderer" };
+    return {
+        paths,
+        backupCreated,
+        ipcInjected: true,
+        pluginMetaInjected: true,
+        mode: "patched-vencord-renderer"
+    };
 }
 
 function ensureRepoRoot(repoRoot) {
@@ -895,14 +1005,28 @@ function status(options = {}) {
 function statusInstalledVencord(options = {}) {
     const paths = getVencordPaths(options);
     const rendererExists = fs.existsSync(paths.rendererPath);
+    const patcherExists = fs.existsSync(paths.patcherPath);
+    const preloadExists = fs.existsSync(paths.preloadPath);
     const rendererCode = rendererExists ? readRenderer(paths) : "";
-    const rendererContainsPlugin = rendererExists && rendererCode.includes(VENCORD_PATCH_START);
+    const patcherCode = patcherExists ? fs.readFileSync(paths.patcherPath, "utf8") : "";
+    const preloadCode = preloadExists ? fs.readFileSync(paths.preloadPath, "utf8") : "";
+    const rendererContainsPlugin = rendererCode.includes(VENCORD_PATCH_START);
+    const pluginMetaPresent = hasInstalledVencordPluginMeta(rendererCode);
+    const ipcHandlerPresent = patcherCode.includes('_fsIpc.handle("FileSplitterFetchBlob"');
+    const preloadBridgePresent = hasVencordPreloadBridge(preloadCode);
+
     return {
         paths,
         backupExists: fs.existsSync(paths.rendererBak),
         distExists: fs.existsSync(paths.distFolder),
         rendererExists,
-        rendererContainsPlugin
+        patcherExists,
+        preloadExists,
+        rendererContainsPlugin,
+        pluginMetaPresent,
+        ipcHandlerPresent,
+        preloadBridgePresent,
+        fullyPatched: rendererContainsPlugin && pluginMetaPresent && ipcHandlerPresent && preloadBridgePresent
     };
 }
 
@@ -932,7 +1056,11 @@ function printInstalledVencordStatus(state) {
     console.log(`- dist folder: ${state.distExists ? "present" : "missing"}`);
     console.log(`- renderer.js: ${state.rendererExists ? "present" : "missing"}`);
     console.log(`- renderer backup: ${state.backupExists ? "present" : "missing"}`);
-    console.log(`- patch marker: ${state.rendererContainsPlugin ? "present" : "missing"}`);
+    console.log("- patch marker: " + (state.rendererContainsPlugin ? "present" : "missing"));
+    console.log("- plugin metadata: " + (state.pluginMetaPresent ? "present" : "missing"));
+    console.log("- IPC handler: " + (state.ipcHandlerPresent ? "present" : "missing"));
+    console.log("- preload bridge: " + (state.preloadBridgePresent ? "present" : "missing"));
+    console.log("- complete: " + (state.fullyPatched ? "yes" : "no"));
 }
 
 function getLocalAppDataRoot(options = {}) {
@@ -1564,7 +1692,11 @@ async function runCli(argv = process.argv.slice(2)) {
                         "Installed Vencord status",
                         `renderer.js: ${state.rendererExists ? "present" : "missing"}`,
                         `backup: ${state.backupExists ? "present" : "missing"}`,
-                        `patch marker: ${state.rendererContainsPlugin ? "present" : "missing"}`
+                        "patch marker: " + (state.rendererContainsPlugin ? "present" : "missing"),
+                        "plugin metadata: " + (state.pluginMetaPresent ? "present" : "missing"),
+                        "IPC handler: " + (state.ipcHandlerPresent ? "present" : "missing"),
+                        "preload bridge: " + (state.preloadBridgePresent ? "present" : "missing"),
+                        "complete: " + (state.fullyPatched ? "yes" : "no")
                     ].join("\n"));
                     return;
                 }
@@ -1696,6 +1828,7 @@ module.exports = {
     restore,
     restoreInstalledVencord,
     status,
+    statusInstalledVencord,
     getPaths,
     extractArchiveSync,
     repackArchiveSync
