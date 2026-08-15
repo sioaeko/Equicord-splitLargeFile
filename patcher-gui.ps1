@@ -1,3 +1,8 @@
+<#
+FileSplitter Patcher
+Copyright (c) 2026 sioaeko and contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+#>
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -6,7 +11,7 @@ Add-Type -AssemblyName System.Drawing
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "FileSplitter Patcher"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(560, 290)
+$form.Size = New-Object System.Drawing.Size(560, 410)
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
 $form.MinimizeBox = $false
@@ -29,10 +34,10 @@ $modeBox = New-Object System.Windows.Forms.ComboBox
 $modeBox.Location = New-Object System.Drawing.Point(110, 48)
 $modeBox.Size = New-Object System.Drawing.Size(300, 26)
 $modeBox.DropDownStyle = "DropDownList"
-[void]$modeBox.Items.Add("Installed Equicord (Roaming\Equicord)")
-[void]$modeBox.Items.Add("Installed Vencord (Roaming\Vencord)")
-[void]$modeBox.Items.Add("Source Repo (Vencord)")
-[void]$modeBox.Items.Add("Source Repo (Equicord)")
+[void]$modeBox.Items.Add("Installed Equicord (compatibility patch)")
+[void]$modeBox.Items.Add("Installed Vencord (compatibility patch)")
+[void]$modeBox.Items.Add("Source Repo (Vencord - preferred)")
+[void]$modeBox.Items.Add("Source Repo (Equicord - preferred)")
 $modeBox.SelectedIndex = 0
 $form.Controls.Add($modeBox)
 
@@ -55,7 +60,7 @@ $browseButton.Size = New-Object System.Drawing.Size(84, 28)
 $form.Controls.Add($browseButton)
 
 $hint = New-Object System.Windows.Forms.Label
-$hint.Text = "Installed mode patches %APPDATA%\Equicord. Source mode copies files into src\userplugins\fileSplitter."
+$hint.Text = "Installed mode modifies local client files. Source mode copies the plugin into a source checkout."
 $hint.Location = New-Object System.Drawing.Point(20, 124)
 $hint.Size = New-Object System.Drawing.Size(512, 34)
 $hint.ForeColor = [System.Drawing.Color]::DimGray
@@ -68,6 +73,20 @@ $restartCheck.Size = New-Object System.Drawing.Size(360, 24)
 $restartCheck.Checked = $true
 $form.Controls.Add($restartCheck)
 
+$warning = New-Object System.Windows.Forms.Label
+$warning.Text = "Unofficial project. Client modifications may violate Discord's Terms and may risk account enforcement. Installed modes modify local client files. Only share files you are authorized to send."
+$warning.Location = New-Object System.Drawing.Point(20, 190)
+$warning.Size = New-Object System.Drawing.Size(512, 58)
+$warning.ForeColor = [System.Drawing.Color]::DarkRed
+$form.Controls.Add($warning)
+
+$riskCheck = New-Object System.Windows.Forms.CheckBox
+$riskCheck.Text = "I understand the notice and accept responsibility for installing and using FileSplitter."
+$riskCheck.Location = New-Object System.Drawing.Point(20, 252)
+$riskCheck.Size = New-Object System.Drawing.Size(512, 42)
+$riskCheck.Checked = $false
+$form.Controls.Add($riskCheck)
+
 $result = $null
 
 function Set-ModeUi {
@@ -76,7 +95,7 @@ function Set-ModeUi {
         if ([string]::IsNullOrWhiteSpace($pathBox.Text) -or $pathBox.Text -match "src\\userplugins") {
             $pathBox.Text = Join-Path $env:APPDATA "Equicord"
         }
-        $hint.Text = "Installed mode patches %APPDATA%\Equicord using equicord.asar.bak."
+        $hint.Text = "Compatibility mode modifies %APPDATA%\Equicord and creates equicord.asar.bak."
         $restoreButton.Enabled = $true
         $restartCheck.Enabled = $true
     } elseif ($modeBox.SelectedIndex -eq 1) {
@@ -84,7 +103,7 @@ function Set-ModeUi {
         if ([string]::IsNullOrWhiteSpace($pathBox.Text) -or $pathBox.Text -match "src\\userplugins" -or $pathBox.Text -eq (Join-Path $env:APPDATA "Equicord")) {
             $pathBox.Text = Join-Path $env:APPDATA "Vencord"
         }
-        $hint.Text = "Installed mode patches %APPDATA%\Vencord\dist\renderer.js with a backup file."
+        $hint.Text = "Compatibility mode modifies Vencord dist files and creates backup files."
         $restoreButton.Enabled = $true
         $restartCheck.Enabled = $true
     } elseif ($modeBox.SelectedIndex -eq 2) {
@@ -122,32 +141,44 @@ $browseButton.Add_Click({
 
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install / Update"
-$installButton.Location = New-Object System.Drawing.Point(180, 206)
+$installButton.Location = New-Object System.Drawing.Point(180, 326)
 $installButton.Size = New-Object System.Drawing.Size(110, 32)
+$installButton.Enabled = $false
 $form.Controls.Add($installButton)
 
 $statusButton = New-Object System.Windows.Forms.Button
 $statusButton.Text = "Status"
-$statusButton.Location = New-Object System.Drawing.Point(298, 206)
+$statusButton.Location = New-Object System.Drawing.Point(298, 326)
 $statusButton.Size = New-Object System.Drawing.Size(84, 32)
 $form.Controls.Add($statusButton)
 
 $restoreButton = New-Object System.Windows.Forms.Button
 $restoreButton.Text = "Restore"
-$restoreButton.Location = New-Object System.Drawing.Point(390, 206)
+$restoreButton.Location = New-Object System.Drawing.Point(390, 326)
 $restoreButton.Size = New-Object System.Drawing.Size(84, 32)
 $form.Controls.Add($restoreButton)
 
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = "Cancel"
-$cancelButton.Location = New-Object System.Drawing.Point(480, 206)
+$cancelButton.Location = New-Object System.Drawing.Point(480, 326)
 $cancelButton.Size = New-Object System.Drawing.Size(64, 32)
 $form.Controls.Add($cancelButton)
+
+$riskCheck.Add_CheckedChanged({
+    $installButton.Enabled = $riskCheck.Checked
+})
 
 $emit = {
     param([string]$action)
     if ([string]::IsNullOrWhiteSpace($pathBox.Text)) {
         [System.Windows.Forms.MessageBox]::Show($form, "Please choose a target path.", "FileSplitter Patcher",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    if ($action -eq "install" -and -not $riskCheck.Checked) {
+        [System.Windows.Forms.MessageBox]::Show($form, "Review and accept the notice before installing.", "FileSplitter Patcher",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         return
@@ -173,6 +204,7 @@ $emit = {
         sourceFlavor = $sourceFlavor
         path = $pathBox.Text
         restartClient = $restartCheck.Checked
+        riskAccepted = $riskCheck.Checked
     } | ConvertTo-Json -Compress
     $form.Close()
 }

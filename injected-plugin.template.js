@@ -1,6 +1,11 @@
+/*
+ * FileSplitter
+ * Copyright (c) 2026 sioaeko and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
 var _FS_=__DP_FN__({
 name:"FileSplitter",
-description:"Splits large files into Discord-sized chunks and rebuilds them in chat.",
+description:"Splits large files into attachment-sized chunks and rebuilds them in chat.",
 authors:[{id:1505110745258397849n,name:"sioaeko"}],
 dependencies:["ChatInputButtonAPI","MessageAccessoriesAPI"],
 renderMessageAccessory(props){

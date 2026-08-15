@@ -543,7 +543,7 @@ let cleanupInterval: ReturnType<typeof setInterval> | undefined;
 
 export default definePlugin({
     name: "FileSplitter",
-    description: "Splits large files into Discord-sized chunks and rebuilds them in chat.",
+    description: "Splits large files into attachment-sized chunks and rebuilds them in chat.",
     tags: ["Chat", "Utility"],
     authors: [
         {

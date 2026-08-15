@@ -8,17 +8,14 @@
     "patch": "node patcher.js --install",
     "restore": "node patcher.js --restore",
     "status": "node patcher.js --status",
-    "build:exe": "pkg . --target node18-win-x64 --output dist/FileSplitterPatcher.exe",
-    "build:mac-x64": "pkg . --target node18-macos-x64 --output dist/FileSplitterPatcher-macos-x64",
-    "build:mac-arm64": "pkg . --target node18-macos-arm64 --no-bytecode --public --public-packages \"*\" --output dist/FileSplitterPatcher-macos-arm64",
+    "build:exe": "pkg . --target node22-win-x64 --output dist/FileSplitterPatcher.exe",
+    "build:mac-x64": "pkg . --target node22-macos-x64 --output dist/FileSplitterPatcher-macos-x64",
+    "build:mac-arm64": "pkg . --target node22-macos-arm64 --no-bytecode --public --public-packages \"*\" --output dist/FileSplitterPatcher-macos-arm64",
     "build:mac-arm64:signed": "npm run build:mac-arm64 && codesign --force --sign - dist/FileSplitterPatcher-macos-arm64",
     "test:injected": "node tests/injected-plugin-lifecycle.test.js",
     "test:vencord-patcher": "node tests/vencord-patcher.test.js",
-    "test": "npm run test:injected && npm run test:vencord-patcher"
-  },
-  "dependencies": {},
-  "devDependencies": {
-    "pkg": "^5.8.1"
+    "test": "npm run test:injected && npm run test:vencord-patcher && npm run test:legal",
+    "test:legal": "node tests/legal-surface.test.js"
   },
   "pkg": {
     "scripts": [
@@ -35,7 +32,21 @@
       "src/equicordplugins/fileSplitter/types.ts",
       "injected-plugin.template.js",
       "patcher-gui.ps1",
-      "patcher-gui.applescript"
+      "patcher-gui.applescript",
+      "LICENSE",
+      "LEGAL_NOTICE.md",
+      "THIRD_PARTY_NOTICES.md",
+      "licenses/Node.js-LICENSE",
+      "licenses/yao-pkg-pkg-LICENSE"
     ]
+  },
+  "description": "Splits user-selected files into attachment-sized parts and reconstructs them locally.",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sioaeko/Equicord-splitLargeFile.git"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "6.22.0"
   }
 }

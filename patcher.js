@@ -1,3 +1,8 @@
+/*
+ * FileSplitter Patcher
+ * Copyright (c) 2026 sioaeko and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -10,6 +15,18 @@ const EQUICORD_PATCH_START = "/* FILESPLITTER_EQUICORD_PATCH_START */";
 const EQUICORD_PATCH_END = "/* FILESPLITTER_EQUICORD_PATCH_END */";
 const VENCORD_IPC_MARKER = "/* FILESPLITTER_IPC */";
 const VENCORD_PLUGIN_META_ENTRY = 'FileSplitter:{folderName:"src/userplugins/fileSplitter",userPlugin:true},';
+const LEGAL_ASSETS = [
+    ["Project license", "LICENSE"],
+    ["Legal notice", "LEGAL_NOTICE.md"],
+    ["Third-party notices", "THIRD_PARTY_NOTICES.md"],
+    ["Build tool license", "licenses/yao-pkg-pkg-LICENSE"],
+    ["Node.js runtime license", "licenses/Node.js-LICENSE"]
+];
+const INSTALL_RISK_ERROR = [
+    "Installation requires explicit acknowledgement because FileSplitter is an unofficial client modification.",
+    "Review the legal and account-risk notice with --legal, then rerun the install command with --accept-risk.",
+    "Status and restore commands do not require acknowledgement."
+].join(" ");
 const ROOT_DIR = __dirname;
 const PLATFORM = process.platform;
 const MAC_CLIENT_NAMES = ["Discord", "Discord PTB", "Discord Canary", "Equicord", "Equilotl"];
@@ -322,6 +339,21 @@ function getVencordPaths(options = {}) {
 
 function readAssetText(name) {
     return fs.readFileSync(getAssetPath(name), "utf8");
+}
+
+function printLegalInformation() {
+    console.log("Runtime: Node.js " + process.version + " (" + process.platform + "-" + process.arch + ")");
+    console.log("");
+    for (const [label, asset] of LEGAL_ASSETS) {
+        console.log(`===== ${label} =====`);
+        console.log(readAssetText(asset).trimEnd());
+        console.log("");
+    }
+}
+
+function requireRiskAcceptance(accepted) {
+    if (accepted === true) return;
+    throw new Error(INSTALL_RISK_ERROR);
 }
 
 function analyzeRenderer(code) {
@@ -678,7 +710,7 @@ async function install(options = {}) {
     const current = readRenderer(paths).trimEnd();
     fs.writeFileSync(paths.rendererPath, `${current}\n${fallback}`);
 
-    // Inject IPC fetch handler into patcher.js and preload.js (bypasses CORS)
+    // Inject a native fetch bridge for Discord attachment CDN downloads.
     let ipcInjected = false;
     try {
         const eqPatcherPath = path.join(paths.equicordFolder, "patcher.js");
@@ -1584,6 +1616,7 @@ function parseArgs(argv) {
         vencordRoot: undefined,
         repo: undefined,
         restartClient: false,
+        acceptRisk: false,
         clientExe: undefined
     };
 
@@ -1598,12 +1631,14 @@ function parseArgs(argv) {
         else if (arg === "--install-source") options.command = "install-source";
         else if (arg === "--status-source") options.command = "status-source";
         else if (arg === "--restart-client-only") options.command = "restart-client-only";
+        else if (arg === "--legal") options.command = "legal";
         else if (arg === "--gui") options.command = "gui";
         else if (arg === "--appdata") options.appData = args.shift();
         else if (arg === "--equicord-root") options.equicordRoot = args.shift();
         else if (arg === "--vencord-root") options.vencordRoot = args.shift();
         else if (arg === "--repo") options.repo = args.shift();
         else if (arg === "--restart-client") options.restartClient = true;
+        else if (arg === "--accept-risk") options.acceptRisk = true;
         else if (arg === "--client-exe") options.clientExe = args.shift();
         else if (arg === "--help" || arg === "-h" || arg === "/?") options.command = "help";
         else throw new Error(`Unknown argument: ${arg}`);
@@ -1618,17 +1653,18 @@ function printHelp() {
     console.log("Usage:");
     console.log(`  ${getBinaryLabel()}`);
     console.log(`  ${getBinaryLabel()} --gui`);
-    console.log(`  ${getBinaryLabel()} --install`);
+    console.log(`  ${getBinaryLabel()} --legal`);
+    console.log(`  ${getBinaryLabel()} --install --accept-risk`);
     console.log(`  ${getBinaryLabel()} --restore`);
     console.log(`  ${getBinaryLabel()} --status`);
-    console.log(`  ${getBinaryLabel()} --install-vencord`);
+    console.log(`  ${getBinaryLabel()} --install-vencord --accept-risk`);
     console.log(`  ${getBinaryLabel()} --restore-vencord`);
     console.log(`  ${getBinaryLabel()} --status-vencord`);
-    console.log(`  ${getBinaryLabel()} --install --restart-client`);
+    console.log(`  ${getBinaryLabel()} --install --accept-risk --restart-client`);
     console.log(`  ${getBinaryLabel()} --restore --restart-client`);
-    console.log(`  ${getBinaryLabel()} --install-vencord --restart-client`);
+    console.log(`  ${getBinaryLabel()} --install-vencord --accept-risk --restart-client`);
     console.log(`  ${getBinaryLabel()} --restore-vencord --restart-client`);
-    console.log(`  ${getBinaryLabel()} --install-source --repo <path>`);
+    console.log(`  ${getBinaryLabel()} --install-source --repo <path> --accept-risk`);
     console.log(`  ${getBinaryLabel()} --status-source --repo <path>`);
     console.log(`  ${getBinaryLabel()} --restart-client-only`);
     console.log("");
@@ -1638,6 +1674,7 @@ function printHelp() {
     console.log("  --vencord-root <path>    Override Vencord roaming root");
     console.log("  --repo <path>            Vencord/Equicord source repo root");
     console.log("  --restart-client         Restart Discord/Equicord after install or restore");
+    console.log("  --accept-risk            Acknowledge the notice for CLI install commands");
     console.log("  --client-exe <path>      Override client executable path for restart");
 }
 
@@ -1647,6 +1684,11 @@ async function runCli(argv = process.argv.slice(2)) {
 
         if (options.command === "help") {
             printHelp();
+            return;
+        }
+
+        if (options.command === "legal") {
+            printLegalInformation();
             return;
         }
 
@@ -1676,6 +1718,7 @@ async function runCli(argv = process.argv.slice(2)) {
                     return;
                 }
 
+                requireRiskAcceptance(selection.riskAccepted);
                 const installed = await install(installedOptions);
                 const message = formatInstalledSuccessMessage(installed, null);
                 showResultWindow("FileSplitterPatcher", selection.restartClient ? `${message}\n\nClose this window to restart Discord.` : message);
@@ -1709,6 +1752,7 @@ async function runCli(argv = process.argv.slice(2)) {
                     return;
                 }
 
+                requireRiskAcceptance(selection.riskAccepted);
                 const installed = installInstalledVencord(installedOptions);
                 const message = formatInstalledVencordSuccessMessage(installed, null);
                 showResultWindow("FileSplitterPatcher", selection.restartClient ? `${message}\n\nClose this window to restart Discord.` : message);
@@ -1731,6 +1775,7 @@ async function runCli(argv = process.argv.slice(2)) {
                 return;
             }
 
+            requireRiskAcceptance(selection.riskAccepted);
             const sourceInstall = installSourceRepo(sourceOptions);
             showResultWindow("FileSplitterPatcher", `Install complete.\n\nInstalled FileSplitter ${sourceFlavorLabel} source plugin into:\n${sourceInstall.pluginDir}`);
             return;
@@ -1774,12 +1819,14 @@ async function runCli(argv = process.argv.slice(2)) {
         }
 
         if (options.command === "install-source") {
+            requireRiskAcceptance(options.acceptRisk);
             const result = installSourceRepo(options);
             console.log(`Installed FileSplitter source plugin into ${result.pluginDir}`);
             return;
         }
 
         if (options.command === "install-vencord") {
+            requireRiskAcceptance(options.acceptRisk);
             const result = installInstalledVencord(options);
             console.log(result.backupCreated
                 ? `Created backup: ${result.paths.rendererBak}`
@@ -1792,6 +1839,7 @@ async function runCli(argv = process.argv.slice(2)) {
             return;
         }
 
+        requireRiskAcceptance(options.acceptRisk);
         const result = await install(options);
         console.log(result.backupCreated
             ? `Created backup: ${result.paths.asarBak}`

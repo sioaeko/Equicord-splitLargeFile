@@ -1,20 +1,23 @@
-# FileSplitter - Equicord Plugin
+# FileSplitter for Equicord and Vencord
 
-FileSplitter is a Equicord plugin that works around Discord's upload limit by splitting large files into 10MB parts on upload, then rebuilding them on the receiving side inside the client.
+FileSplitter splits a user-selected file into 10MB attachment-sized parts, sends each part through the existing client upload flow, and reconstructs the original file locally for recipients who have the plugin.
 
-The project now supports both source-based installs and a release patcher for already-installed clients, so users who do not want to clone/build a repo can still use the full plugin.
+The project supports source-based installs and an optional compatibility patcher for already-installed Vencord or Equicord clients.
+
+> [!WARNING]
+> FileSplitter is an unofficial community project and is not affiliated with or endorsed by Discord Inc., Vencord, or Equicord. Client modifications may violate Discord's Terms of Service and may place a Discord account at risk. Installed-client compatibility mode modifies local client files. Only share files you have the legal right and recipient permission to send. Read [LEGAL_NOTICE.md](LEGAL_NOTICE.md) before installing.
 
 ## Quick Install
 
-Most users should install with the release patcher from the latest GitHub release:
+Source installation has the smallest additional modification surface. Users who already have an installed Vencord or Equicord client can instead use the compatibility patcher from the latest GitHub release:
 
 1. Fully close Discord.
 2. Download the patcher for your OS from the [latest release](https://github.com/sioaeko/Equicord-splitLargeFile/releases/latest):
    - Windows: `FileSplitterPatcher.exe`
    - Apple Silicon macOS: `FileSplitterPatcher-macos-arm64.zip`
-3. Run the patcher.
+3. Run the patcher and review the displayed legal and account-risk notice.
 4. Choose `Installed Equicord` or `Installed Vencord`.
-5. Click `Install / Update`.
+5. Confirm that you understand the notice, then click `Install / Update`.
 6. Reopen Discord and enable `FileSplitter` in the plugin list if it is not already enabled.
 
 If Discord is already running during install, restart it after the patcher finishes. The patcher creates a backup and includes restore/status actions.
@@ -94,9 +97,9 @@ If Discord is already running during install, restart it after the patcher finis
 
 There are three supported ways to use FileSplitter.
 
-### Option 1: Release Patcher For Installed Clients
+### Option 1: Compatibility Patcher For Installed Clients
 
-Recommended for most Windows and Apple Silicon macOS users who already use installed Equicord or Vencord.
+Use this when you already have an installed Equicord or Vencord client and accept the additional risk of modifying its local files. Source installation is preferred when practical.
 
 Download:
 https://github.com/sioaeko/Equicord-splitLargeFile/releases/latest
@@ -231,17 +234,19 @@ node patcher.js --help
 Examples:
 
 ```bash
-node patcher.js --install
+node patcher.js --legal
+node patcher.js --install --accept-risk
 node patcher.js --restore
 node patcher.js --status
-node patcher.js --install-vencord
+node patcher.js --install-vencord --accept-risk
 node patcher.js --restore-vencord
 node patcher.js --status-vencord
-node patcher.js --install-source --repo C:\path\to\Vencord
+node patcher.js --install-source --repo C:\path\to\Vencord --accept-risk
 ```
 
 Command meaning:
 
+- `--legal`: print the legal notice, GPL text, and bundled third-party licenses
 - `--install`: patch installed Equicord
 - `--restore`: restore installed Equicord from backup
 - `--status`: check installed Equicord patch status
@@ -249,24 +254,27 @@ Command meaning:
 - `--restore-vencord`: restore installed Vencord from backup
 - `--status-vencord`: check installed Vencord patch status
 - `--install-source --repo <path>`: copy the source plugin into `src/userplugins/fileSplitter`
+- `--accept-risk`: required for CLI install commands after reviewing `--legal`; not required for status or restore
 
 For a release binary, the same commands work after replacing `node patcher.js` with the downloaded file path:
 
 ```powershell
 cd "$env:USERPROFILE\Downloads"
-.\FileSplitterPatcher.exe --install
-.\FileSplitterPatcher.exe --install-vencord
+.\FileSplitterPatcher.exe --legal
+.\FileSplitterPatcher.exe --install --accept-risk
+.\FileSplitterPatcher.exe --install-vencord --accept-risk
 
 # Or, from this repository after building:
-.\dist\FileSplitterPatcher.exe --install
+.\dist\FileSplitterPatcher.exe --install --accept-risk
 ```
 
 For the Apple Silicon macOS release binary:
 
 ```bash
 cd ~/Downloads
-./FileSplitterPatcher-macos-arm64 --install
-./FileSplitterPatcher-macos-arm64 --install-vencord
+./FileSplitterPatcher-macos-arm64 --legal
+./FileSplitterPatcher-macos-arm64 --install --accept-risk
+./FileSplitterPatcher-macos-arm64 --install-vencord --accept-risk
 ```
 
 Build release binaries from this repo:
@@ -325,10 +333,10 @@ cat filename.part001 filename.part002 filename.part003 > originalfile
 
 | Target | Supported | Notes |
 |------|------|------|
-| Installed Equicord | Yes | Supported by the Windows and Apple Silicon macOS release patchers |
-| Installed Vencord | Yes | Supported by the Windows and Apple Silicon macOS release patchers |
-| Vencord source repo | Yes | Supported by the release patchers and manual install |
-| Equicord source repo | Yes | Supported by the release patchers and manual install |
+| Installed Equicord | Yes | Compatibility mode; modifies local client files after explicit consent |
+| Installed Vencord | Yes | Compatibility mode; modifies local client files after explicit consent |
+| Vencord source repo | Yes | Preferred when practical; supported by the patcher and manual install |
+| Equicord source repo | Yes | Preferred when practical; supported by the patcher and manual install |
 | Plain Discord without Vencord/Equicord | No | The patcher does not install a mod client by itself |
 
 ## Technical Details
@@ -340,7 +348,7 @@ cat filename.part001 filename.part002 filename.part003 > originalfile
 | File Formats | All file types |
 | Image Preview Types | Common inline image formats |
 | Metadata Transport | JSON in message content |
-| Upload Path | Discord upload pipeline through CloudUploader + RestAPI |
+| Upload Path | Existing client upload pipeline; every part remains subject to Discord's server-side checks |
 | Rebuild Path | Local fetch + Blob reconstruction |
 | Chunk Expiry | 30 minutes |
 | Part Naming | `filename.part001`, `filename.part002`, ... |
@@ -348,7 +356,7 @@ cat filename.part001 filename.part002 filename.part003 > originalfile
 ## Troubleshooting
 
 **Q: I cannot build the plugin from source**
-A: Use the release patcher instead. `FileSplitterPatcher.exe` on Windows or `FileSplitterPatcher-macos-arm64` on Apple Silicon macOS is intended specifically for users who do not want to deal with source builds or repo layout changes.
+A: The release patcher remains available as compatibility mode. Review its notice first because installed-client mode directly modifies local Vencord or Equicord files.
 
 **Q: The plugin does not show up after patching**
 A: Fully close Discord, patch the correct target, then restart Discord. If you are using a source repo, rebuild/inject again after copying the plugin.
@@ -365,18 +373,27 @@ A: The rebuilt result card is local client-side UI. Users without the plugin onl
 **Q: Can this patch plain Discord directly?**
 A: No. The patcher targets Vencord/Equicord installs or source repos. It does not install a custom client on top of plain Discord by itself.
 
-## Security
+## Security And Privacy
 
 - File reconstruction is done locally on the receiving client
-- No external merge server is used
-- Files are transferred only through Discord's own attachment/CDN flow
-- Installed patching creates a local backup before modifying client files
+- No external merge server, telemetry service, or token collection is used
+- Native attachment downloads are restricted to HTTPS Discord attachment CDN URLs
+- Every uploaded part remains subject to Discord's normal server-side checks
+- Installed patching validates its changes and creates a local backup before modifying client files
+- Status and restore actions remain available without accepting installation risk
+
+## Responsible Use
+
+- Do not use FileSplitter to evade rate limits, moderation, access controls, payment controls, or other safeguards
+- Do not send malware, spam, unlawful material, or files you are not authorized to share
+- Respect recipient consent, channel rules, server rules, Discord policies, and applicable law
 
 ## Credits
 
 - Author: [sioaeko](https://github.com/sioaeko)
 - Original concept: [ImTheSquid/SplitLargeFiles](https://github.com/ImTheSquid/SplitLargeFiles)
+- Full attribution and bundled-runtime notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ## License
 
-MIT License
+FileSplitter is distributed under [GPL-3.0-or-later](LICENSE). See [LEGAL_NOTICE.md](LEGAL_NOTICE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
